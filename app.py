@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit app to explore and shuffle songs classified by stage.
-Downloads data file from GCS, then queries locally using DuckDB.
+Streamlit app to explore and shuffle songs classified by stage,
+querying data directly from GCS using DuckDB.
 Reads configuration AND stage specs from config.yaml file.
 Includes comprehensive filtering, pagination below tables, an all catalog view,
-improved shuffle logic (using Pandas sampling), UI enhancements, a Spec Tester tab,
+improved shuffle logic, UI enhancements, a Spec Tester tab,
 and an embedded Spotify player loaded using st.data_editor interaction.
 Uses sidebar radio for navigation. Reads GCS credentials from st.secrets.
 Added basic password protection.
+Fixes DATA_PATH NameError.
 """
 
 import streamlit as st
@@ -29,7 +30,6 @@ import tempfile # To create temporary file paths
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
 
 # --- Password Protection ---
-
 def check_password():
     """Returns `True` if the user had the correct password."""
     correct_password = st.secrets.get("PASSWORD")
@@ -62,9 +62,12 @@ def load_config():
              return None, f"Config file '{CONFIG_FILE}' missing required keys."
         gcs_path = config_data.get('local_data_path')
         is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
-        # Path MUST be GCS for deployed app now
         if is_deployed and (not gcs_path or not gcs_path.startswith('gs://')):
              return None, f"Invalid GCS path in config.yaml: '{gcs_path}'. Must start with 'gs://' for deployment."
+        elif not is_deployed and gcs_path and not gcs_path.startswith('gs://') and not os.path.exists(gcs_path):
+             return None, f"Local data file specified in config.yaml not found at: '{gcs_path}'"
+        elif not is_deployed and gcs_path and gcs_path.startswith('gs://'):
+             print(f"Warning: GCS path specified in config.yaml while running locally. Ensure GCS access is configured.")
         return config_data, None
     except yaml.YAMLError as e: return None, f"Error parsing config file '{CONFIG_FILE}': {e}"
     except Exception as e: return None, f"Error reading config file '{CONFIG_FILE}': {e}"
@@ -94,7 +97,8 @@ definitions = load_definitions(DEFINITIONS_FILE)
 # --- App Configuration ---
 if app_config is None: st.error(config_error_msg); st.error("Stopping execution."); st.stop()
 
-GCS_DATA_PATH = app_config.get('local_data_path') # Path from config (should be gs://)
+# *** Use consistent variable name LOCAL_DATA_PATH for the path ***
+LOCAL_DATA_PATH = app_config.get('local_data_path')
 FILE_FORMAT = app_config.get('file_format', 'parquet').lower()
 DEFAULT_SONGS_PER_PAGE = app_config.get('songs_per_page', 50)
 DEFAULT_MAX_SCORE = app_config.get('default_max_score_filter', 100.0)
@@ -139,51 +143,28 @@ if 'local_data_file_path' not in st.session_state: st.session_state.local_data_f
 def download_gcs_file(gcs_path):
     """Downloads file from GCS to a temporary local path using secrets."""
     print(f"[{time.time()}] Attempting to download from GCS: {gcs_path}")
-    # Check for credentials
     gcs_key_json_content = st.secrets.get("GCS_SERVICE_ACCOUNT_KEY_JSON")
     if not gcs_key_json_content or not gcs_key_json_content.strip():
         st.error("GCS Service Account Key not found or empty in Streamlit secrets.")
         return None
     try:
-        # Load credentials from the JSON string in secrets
         credentials_dict = json.loads(gcs_key_json_content)
         credentials = service_account.Credentials.from_service_account_info(credentials_dict)
         storage_client = storage.Client(credentials=credentials)
         print(f"[{time.time()}] GCS Client created.")
-
-        # Parse bucket and blob name from gs:// path
-        if not gcs_path.startswith("gs://"):
-            st.error(f"Invalid GCS path format: {gcs_path}")
-            return None
-        path_parts = gcs_path[5:].split('/', 1)
-        bucket_name = path_parts[0]
-        blob_name = path_parts[1] if len(path_parts) > 1 else ""
-        if not blob_name:
-             st.error(f"Could not parse blob name from GCS path: {gcs_path}")
-             return None
-
+        if not gcs_path.startswith("gs://"): st.error(f"Invalid GCS path format: {gcs_path}"); return None
+        path_parts = gcs_path[5:].split('/', 1); bucket_name = path_parts[0]; blob_name = path_parts[1] if len(path_parts) > 1 else ""
+        if not blob_name: st.error(f"Could not parse blob name from GCS path: {gcs_path}"); return None
         print(f"[{time.time()}] Bucket: {bucket_name}, Blob: {blob_name}")
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-
-        if not blob.exists():
-             st.error(f"GCS object not found: {gcs_path}")
-             return None
-
-        # Create a temporary file path
-        # Note: Streamlit Cloud has ephemeral filesystem
+        bucket = storage_client.bucket(bucket_name); blob = bucket.blob(blob_name)
+        if not blob.exists(): st.error(f"GCS object not found: {gcs_path}"); return None
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(blob_name)[1]) as temp_file:
             print(f"[{time.time()}] Downloading to temporary file: {temp_file.name}")
             blob.download_to_filename(temp_file.name)
             print(f"[{time.time()}] Download complete.")
-            return temp_file.name # Return the path to the downloaded file
-
-    except json.JSONDecodeError:
-        st.error("GCS Service Account Key in secrets is not valid JSON.")
-        return None
-    except Exception as e:
-        st.error(f"Error downloading file from GCS: {e}")
-        return None
+            return temp_file.name
+    except json.JSONDecodeError: st.error("GCS Service Account Key in secrets is not valid JSON."); return None
+    except Exception as e: st.error(f"Error downloading file from GCS: {e}"); return None
 
 # --- DuckDB Setup ---
 @st.cache_resource
@@ -200,6 +181,25 @@ def get_duckdb_connection():
 
 con = get_duckdb_connection()
 
+# --- Download Data File if needed ---
+# Check if we need to download (running deployed and path not set or file missing)
+is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
+if is_deployed and (not st.session_state.local_data_file_path or not os.path.exists(st.session_state.local_data_file_path)):
+     if LOCAL_DATA_PATH.startswith("gs://"):
+          st.session_state.local_data_file_path = download_gcs_file(LOCAL_DATA_PATH)
+     else:
+          # This case should have been caught by load_config if deployed
+          st.error("Deployment requires a GCS path in config, but local_data_path is not gs://")
+          st.stop()
+elif not is_deployed and not os.path.exists(LOCAL_DATA_PATH):
+     # Handle case where local file path is specified but missing
+     st.error(f"Local data file not found at specified path: {LOCAL_DATA_PATH}")
+     st.stop()
+elif not is_deployed:
+     # Use the direct local path if running locally
+     st.session_state.local_data_file_path = LOCAL_DATA_PATH
+
+
 # --- Data Loading and Querying Functions ---
 
 def get_read_options():
@@ -208,7 +208,7 @@ def get_read_options():
     if FILE_FORMAT == 'csv':
         read_options = ", header=true"
         # Check if original GCS path indicated compression
-        if GCS_DATA_PATH.endswith('.gz'):
+        if GCS_DATA_PATH.endswith('.gz'): # Check original GCS path for compression
             read_options += ", compression='gzip'"
     return read_options
 
@@ -218,12 +218,16 @@ def read_from_source():
     local_path = st.session_state.get('local_data_file_path')
     if not local_path or not os.path.exists(local_path):
          st.error("Local data file path not available or file missing.")
-         return "read_parquet('')" # Return dummy to avoid query error, but will fail
+         # Return a dummy that will likely cause downstream errors, but prevents immediate crash
+         return "read_parquet('')"
 
     read_function = f"read_{FILE_FORMAT}"
     read_options = get_read_options()
     # Read from the temporary local path
-    return f"{read_function}('{local_path}'{read_options})"
+    # Escape potential backslashes in Windows paths for the string literal
+    safe_local_path = local_path.replace('\\', '\\\\')
+    return f"{read_function}('{safe_local_path}'{read_options})"
+
 
 # --- The rest of the functions (get_stage_mapping, get_feature_ranges, etc.)
 # --- remain largely the same, as they use read_from_source() which now points to the local temp file ---
@@ -510,15 +514,41 @@ if not con: st.error("Could not establish DuckDB connection. Stopping."); st.sto
 # Check GCS Path here if needed, or rely on DuckDB errors
 if not DATA_PATH: st.error("Data path not defined in config.yaml."); st.stop()
 
+# --- Download GCS file ONCE and store path in session state ---
+if 'local_data_file_path' not in st.session_state or st.session_state.local_data_file_path is None:
+    is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
+    if DATA_PATH.startswith("gs://"):
+        if is_deployed:
+            st.session_state.local_data_file_path = download_gcs_file(DATA_PATH)
+            if st.session_state.local_data_file_path is None:
+                st.error("Failed to download data from GCS. Stopping.")
+                st.stop()
+        else: # Running locally with GCS path
+             st.warning("Running locally but config points to GCS. Attempting direct read. Ensure ADC is set up.")
+             # For local testing with GCS, DuckDB needs ADC or explicit creds
+             # We'll rely on DuckDB's default chain for now.
+             st.session_state.local_data_file_path = DATA_PATH # Use GCS path directly
+    elif os.path.exists(DATA_PATH):
+         st.session_state.local_data_file_path = DATA_PATH # Use local path
+    else:
+         st.error(f"Local data file not found at: {DATA_PATH}")
+         st.stop()
+
+# Ensure the file path is now set
+if not st.session_state.local_data_file_path:
+     st.error("Data file path could not be determined. Stopping.")
+     st.stop()
+
+
 if not STAGE_SPECS: st.error(f"Error: Stage specifications not loaded correctly from '{CONFIG_FILE}'. Stopping."); st.stop()
 
-# --- Fetch initial data for UI elements ---
+# --- Fetch initial data for UI elements (using local path now) ---
 with st.spinner("Loading initial data and candidate songs..."):
     stage_mapping = get_stage_mapping()
+    # Pass connection to functions that need it
     feature_ranges = get_feature_ranges(con, CONTINUOUS_FEATURES)
-    discrete_values = get_discrete_feature_values(con, DISCRETE_FEATURES) # Only load discrete features used for filtering
-    # Load candidate songs for shuffle (using default rank 1)
-    candidate_songs_df = load_candidate_songs(con, rank_threshold=1) # Load Rank 1 songs
+    discrete_values = get_discrete_feature_values(con, DISCRETE_FEATURES)
+    candidate_songs_df = load_candidate_songs(con, rank_threshold=1)
 
 if not stage_mapping: st.warning("Could not load stage information from config.")
 
@@ -632,6 +662,12 @@ current_view = st.session_state.current_view
 if not con:
      st.error("Database connection failed. Cannot display content.")
      st.stop()
+
+# Check if data file was downloaded successfully before proceeding
+if not st.session_state.get('local_data_file_path'):
+     st.error("Data file not available. Cannot display content.")
+     st.stop()
+
 
 if current_view == "Stage Explorer":
     # st.header("🔍 Stage Explorer") # Removed header
