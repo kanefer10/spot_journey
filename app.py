@@ -29,7 +29,7 @@ import tempfile # To create temporary file paths
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
 
 # --- Password Protection ---
-'''
+
 def check_password():
     """Returns `True` if the user had the correct password."""
     correct_password = st.secrets.get("PASSWORD")
@@ -47,7 +47,7 @@ def check_password():
     return False
 
 if not check_password(): st.stop()
-'''
+
 # --- Load Configuration ---
 CONFIG_FILE = 'config.yaml'
 DEFINITIONS_FILE = 'Spotify_Data_Dictionary.csv'
