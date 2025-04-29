@@ -25,38 +25,6 @@ import json # For parsing service account key
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
 
-# --- Password Protection ---
-def check_password():
-    """Returns `True` if the user had the correct password."""
-    # Check if password is set in secrets
-    # Uses st.secrets which reads from .streamlit/secrets.toml locally
-    # or from secrets set in Streamlit Community Cloud settings
-    if "PASSWORD" not in st.secrets or not st.secrets["PASSWORD"]:
-        st.error("Password not configured in secrets. App cannot run.")
-        st.stop()
-        return False
-
-    def password_entered():
-        """Checks whether a password entered by the user is correct."""
-        if st.session_state["password"] == st.secrets["PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Don't store password.
-        else:
-            st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct", False):
-        return True
-
-    st.text_input("Password", type="password", on_change=password_entered, key="password")
-    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
-        st.error("😕 Password incorrect")
-    elif "password_correct" not in st.session_state:
-         st.info("Please enter the password to access the app.")
-    return False
-
-# Stop execution if password check fails
-if not check_password():
-    st.stop()
 
 # --- The rest of the app runs only if password is correct ---
 
