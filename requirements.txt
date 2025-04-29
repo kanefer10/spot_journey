@@ -4,3 +4,4 @@ pandas
 pyyaml
 google-cloud-storage
 gcsfs
+datasets
