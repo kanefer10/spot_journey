@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Streamlit app to explore and shuffle songs classified by stage,
-querying data directly from GCS using DuckDB.
+querying data directly from a Hugging Face dataset URL using DuckDB.
 Reads configuration AND stage specs from config.yaml file.
 Includes comprehensive filtering, pagination below tables, an all catalog view,
 improved shuffle logic, UI enhancements, a Spec Tester tab,
 and an embedded Spotify player loaded using st.data_editor interaction.
-Uses sidebar radio for navigation. Reads GCS credentials from st.secrets
-and explicitly creates a DuckDB secret for GCS access.
+Uses sidebar radio for navigation. Removed GCS logic.
 Added basic password protection.
 """
 
@@ -22,10 +21,7 @@ import time # For debugging timestamp
 import csv # Import csv library again
 import re # For extracting track ID
 import json # For parsing service account key
-# Removed GCS library imports as DuckDB extension handles access
-# from google.cloud import storage
-# from google.oauth2 import service_account
-# import tempfile
+# Removed GCS library imports
 
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
@@ -61,14 +57,14 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f: config_data = yaml.safe_load(f)
         if not config_data or 'local_data_path' not in config_data or 'file_format' not in config_data or 'stage_specs' not in config_data:
              return None, f"Config file '{CONFIG_FILE}' missing required keys."
-        gcs_path = config_data.get('local_data_path')
+        # *** Validate URL path ***
+        data_path = config_data.get('local_data_path')
         is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
-        if is_deployed and (not gcs_path or not gcs_path.startswith('gs://')):
-             return None, f"Invalid GCS path in config.yaml: '{gcs_path}'. Must start with 'gs://' for deployment."
-        elif not is_deployed and gcs_path and not gcs_path.startswith('gs://') and not os.path.exists(gcs_path):
-             return None, f"Local data file specified in config.yaml not found at: '{gcs_path}'"
-        elif not is_deployed and gcs_path and gcs_path.startswith('gs://'):
-             print(f"Warning: GCS path specified in config.yaml while running locally. Ensure GCS access is configured.")
+        if not data_path or not (data_path.startswith('https://') or os.path.exists(data_path)):
+             if is_deployed and not data_path.startswith('https://'):
+                 return None, f"Invalid URL/Path in config.yaml: '{data_path}'. Must be HTTPS URL for deployment or valid local path."
+             elif not is_deployed and not os.path.exists(data_path) and not data_path.startswith('https://'):
+                  return None, f"Local data file specified in config.yaml not found at: '{data_path}'"
         return config_data, None
     except yaml.YAMLError as e: return None, f"Error parsing config file '{CONFIG_FILE}': {e}"
     except Exception as e: return None, f"Error reading config file '{CONFIG_FILE}': {e}"
@@ -98,8 +94,7 @@ definitions = load_definitions(DEFINITIONS_FILE)
 # --- App Configuration ---
 if app_config is None: st.error(config_error_msg); st.error("Stopping execution."); st.stop()
 
-# *** Use consistent variable name LOCAL_DATA_PATH for the path ***
-LOCAL_DATA_PATH = app_config.get('local_data_path') # This holds GCS or Local path
+DATA_PATH = app_config.get('local_data_path') # Holds HTTPS URL or Local path
 FILE_FORMAT = app_config.get('file_format', 'parquet').lower()
 DEFAULT_SONGS_PER_PAGE = app_config.get('songs_per_page', 50)
 DEFAULT_MAX_SCORE = app_config.get('default_max_score_filter', 100.0)
@@ -141,61 +136,31 @@ if 'current_view' not in st.session_state: st.session_state.current_view = VIEWS
 # --- DuckDB Setup ---
 @st.cache_resource
 def get_duckdb_connection():
-    """Establishes a connection to DuckDB and configures GCS access using secrets."""
+    """Establishes a connection to DuckDB and installs httpfs extension if needed."""
     is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
     print(f"[{time.time()}] Attempting DuckDB connection. Deployed: {is_deployed}")
-
-    # Check for GCS credentials in secrets if needed (path starts with gs://)
-    gcs_key_json_content = None
-    if LOCAL_DATA_PATH.startswith("gs://"):
-        gcs_key_json_content = st.secrets.get("GCS_SERVICE_ACCOUNT_KEY_JSON")
-        if not gcs_key_json_content or not gcs_key_json_content.strip():
-            st.error("GCS Service Account Key not found or empty in Streamlit secrets. Configure secrets in Streamlit Cloud settings or locally in .streamlit/secrets.toml.")
-            return None
-        try:
-            # Validate JSON structure early
-            json.loads(gcs_key_json_content)
-        except json.JSONDecodeError:
-            st.error("GCS Service Account Key in secrets is not valid JSON.")
-            return None
-        except Exception as e: # Catch other potential issues with secrets access
-             st.error(f"Error accessing secrets: {e}")
-             return None
 
     try:
         con = duckdb.connect(database=':memory:', read_only=False)
         print(f"[{time.time()}] DuckDB connection established.")
 
-        # Install and load GCS extension only if needed
-        if LOCAL_DATA_PATH.startswith("gs://"):
-            con.sql("INSTALL gcs;")
-            con.sql("LOAD gcs;")
-            print(f"[{time.time()}] DuckDB GCS extension loaded.")
-
-            # Configure GCS credentials using the service account key from secrets
-            if gcs_key_json_content:
-                try:
-                    # Use DuckDB's CREATE SECRET feature
-                    safe_key_content = gcs_key_json_content.replace("'", "''")
-                    con.sql(f"""
-                        CREATE OR REPLACE SECRET streamlit_gcs_secret (
-                            TYPE GCS,
-                            PROVIDER SERVICE_ACCOUNT,
-                            SERVICE_ACCOUNT_JSON '{safe_key_content}'
-                        );
-                    """)
-                    print(f"[{time.time()}] Created/Replaced DuckDB GCS secret from st.secrets.")
-                except Exception as e:
-                     st.error(f"Error configuring DuckDB GCS credentials from secrets: {e}")
-                     # Attempt to proceed, maybe default credentials work if env is configured
-            # If running locally with gs:// path, assume ADC is configured
-            elif not is_deployed:
-                 print(f"[{time.time()}] Running locally with GCS path. Assuming default GCS credentials (ADC) are configured.")
-
+        # Install and load httpfs extension only if needed (path starts with http)
+        if DATA_PATH.startswith("https://") or DATA_PATH.startswith("http://"):
+            try:
+                con.sql("INSTALL httpfs;")
+                con.sql("LOAD httpfs;")
+                print(f"[{time.time()}] DuckDB httpfs extension loaded.")
+            except Exception as e:
+                 st.error(f"Failed to install/load DuckDB httpfs extension: {e}")
+                 # If extension fails, reading from URL will fail later
+                 # Optionally close connection and return None
+                 # con.close()
+                 # return None
+        # *** REMOVED GCS specific logic ***
         return con
 
     except Exception as e:
-        st.error(f"Error connecting to DuckDB or configuring GCS: {e}")
+        st.error(f"Error connecting to DuckDB: {e}")
         if 'con' in locals() and con:
             try: con.close()
             except: pass
@@ -210,27 +175,24 @@ def get_read_options():
     read_options = ""
     if FILE_FORMAT == 'csv':
         read_options = ", header=true"
-        # Check if original GCS path indicated compression
-        if LOCAL_DATA_PATH.endswith('.gz'): # Check path for compression
-            read_options += ", compression='gzip'"
+        # Check if original path indicated compression (less reliable for http)
+        # Assume no compression for httpfs unless specified otherwise
+        # if DATA_PATH.endswith('.gz'):
+        #     read_options += ", compression='gzip'"
     return read_options
 
 def read_from_source():
-    """Helper function to read from the GCS/Local file source defined in config."""
+    """Helper function to read from the HTTPS/Local file source defined in config."""
     read_function = f"read_{FILE_FORMAT}"
     read_options = get_read_options()
-    path = app_config['local_data_path'] # This holds GCS or Local path
-
-    # Add secret config only if it's a GCS path
-    secret_option = ""
-    if path.startswith("gs://"):
-         # Assume the secret 'streamlit_gcs_secret' was created if connection succeeded
-         secret_option = ", secret='streamlit_gcs_secret'"
-
-    return f"{read_function}('{path}'{read_options}{secret_option})"
+    path = app_config['local_data_path'] # This holds HTTPS URL or Local path
+    # *** REMOVED secret_option ***
+    # Escape single quotes in path just in case
+    safe_path = path.replace("'", "''")
+    return f"{read_function}('{safe_path}'{read_options})"
 
 # --- The rest of the functions (get_stage_mapping, get_feature_ranges, etc.)
-# --- remain largely the same, as they use read_from_source() which now handles GCS/Local ---
+# --- remain largely the same, as they use read_from_source() which now handles HTTPS/Local ---
 # --- Re-paste all function definitions here from the previous version ---
 # ... (get_stage_mapping, get_feature_ranges, get_discrete_feature_values) ...
 # ... (build_where_clause, count_songs, query_paged_songs) ...
@@ -250,10 +212,15 @@ def get_feature_ranges(_con, features):
     if not _con: return {}
     ranges = {}
     try:
-        temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
+        # Use DESCRIBE only if it's likely a local file for performance
+        if not DATA_PATH.startswith("http"):
+             temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
+        else: # Assume all features exist for remote files to avoid slow DESCRIBE over HTTP
+             available_columns = [f.lower() for f in features]
     except Exception as e:
         st.warning(f"Could not describe table to get feature ranges: {e}")
-        available_columns = []
+        available_columns = [f.lower() for f in features] # Assume all exist on error
+
     features_to_query = [f for f in features if f.lower() in available_columns]
     if not features_to_query: st.warning("Could not find expected feature columns in data file to determine ranges."); return {feat: (0.0, 100.0) if feat == 'total_mismatch_score' else (0.0, 1.0) for feat in features}
     valid_features = [f for f in features_to_query if f != 'total_mismatch_score']
@@ -290,10 +257,14 @@ def get_discrete_feature_values(_con, features):
     if not _con: return {}
     values = {}
     try:
-        temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
+        # Avoid DESCRIBE over HTTP if possible
+        if not DATA_PATH.startswith("http"):
+            temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
+        else:
+             available_columns = [f.lower() for f in features] # Assume columns exist
     except Exception as e:
         st.warning(f"Could not describe discrete feature columns: {e}")
-        available_columns = []
+        available_columns = [f.lower() for f in features] # Assume columns exist
     try:
         for feat in features:
             if feat.lower() not in available_columns: print(f"Warning: Discrete feature '{feat}' not found in data file."); values[feat] = []; continue
@@ -353,7 +324,11 @@ def query_paged_songs(_con, stage_num, filters, limit, offset, feature_ranges_lo
     if not _con: return pd.DataFrame()
     full_where_clause = build_where_clause(stage_num, filters, feature_ranges_local)
     try:
-        temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
+        # Avoid DESCRIBE over HTTP if possible
+        if not DATA_PATH.startswith("http"):
+             temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
+        else: # Assume columns exist based on lists
+             available_columns = ['id', 'name', 'artists', 'album', 'track_uri', 'stage_number', 'stage_name', 'stage_rank', 'total_mismatch_score'] + ALL_AUDIO_FEATURES
     except Exception: st.error("Could not describe table columns. Query might fail."); available_columns = []
     # *** Use id and name in base columns ***
     base_select_columns = ['id', 'name', 'artists', 'album', 'track_uri', 'stage_number', 'stage_name', 'stage_rank', 'total_mismatch_score']
@@ -387,7 +362,12 @@ def load_candidate_songs(_con, rank_threshold=1):
     # *** Use id and name here ***
     cols_for_shuffle = ['id', 'name', 'artists', 'album', 'track_uri', 'stage_number', 'stage_name', 'stage_rank', 'total_mismatch_score']
     try:
-        temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
+        # Avoid DESCRIBE over HTTP if possible
+        if not DATA_PATH.startswith("http"):
+             temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
+        else: # Assume columns exist
+             available_columns = cols_for_shuffle + ['key','mode','time_signature','danceability','energy','loudness','speechiness','acousticness','instrumentalness','liveness','valence','tempo']
+
         # Select using actual case found in file, but check against lowercase list
         select_cols_shuffle = []
         cols_for_shuffle_lower = [c.lower() for c in cols_for_shuffle]
@@ -511,17 +491,14 @@ def set_selected_track(uri):
 
 # Check prerequisites
 if not con: st.error("Could not establish DuckDB connection. Stopping."); st.stop()
-# *** Check GCS Path from config ***
-if not DATA_PATH: # Check if path is defined
-     st.error("Data path ('local_data_path') not defined in config.yaml. Stopping.")
+# Check GCS Path from config
+if not DATA_PATH: st.error("Data path not defined in config.yaml."); st.stop()
+# Check if it's a GCS path or a local file that exists
+if not DATA_PATH.startswith("gs://") and not os.path.exists(DATA_PATH):
+     st.error(f"Error: Local data file not found at '{DATA_PATH}'. Check config.yaml.")
      st.stop()
-# No local existence check needed if reading from GCS
-# elif not DATA_PATH.startswith("gs://") and not os.path.exists(DATA_PATH): # Check existence only if local
-#      st.error(f"Error: Data file not found at '{DATA_PATH}'. Please check the path in config.yaml. Stopping.")
-#      st.stop()
 elif DATA_PATH.startswith("gs://"):
-     print(f"Attempting to read from GCS path: {DATA_PATH}")
-
+     print(f"Attempting to read from GCS path: {DATA_PATH}") # Log GCS path usage
 
 if not STAGE_SPECS: st.error(f"Error: Stage specifications not loaded correctly from '{CONFIG_FILE}'. Stopping."); st.stop()
 
@@ -598,10 +575,11 @@ with st.sidebar:
     # st.write("Apply filters to refine songs shown in 'Stage Explorer' and 'All Catalog'.") # Removed descriptive text
     # st.divider(); # Removed divider
     active_filters = {}
-    # --- REMOVED General Filters Subheader and inputs ---
-    # st.subheader("General Filters")
-    # active_filters['song'] = st.text_input("Filter by Song Name (contains):")
-    # active_filters['artist'] = st.text_input("Filter by Artist Name (contains):")
+    # --- ADDED BACK General Filters ---
+    st.subheader("General Filters")
+    active_filters['song'] = st.text_input("Filter by Song Name (contains):")
+    active_filters['artist'] = st.text_input("Filter by Artist Name (contains):")
+    st.divider() # Add divider after general filters
 
     # --- Audio Feature Filters ---
     st.subheader("Audio Features") # Kept this subheader
