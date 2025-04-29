@@ -1,4 +1,4 @@
-local_data_path: 's3://kanefer-datasets/song_data.parquet' # <<< UPDATE THIS PATH if needed
+local_data_path: 'https://kanefer-datasets.s3.eu-north-1.amazonaws.com/song_data.parquet' # <<< UPDATE THIS PATH if needed
 file_format: 'parquet'
 songs_per_page: 50
 default_max_score_filter: 100.0
