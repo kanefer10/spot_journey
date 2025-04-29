@@ -6,7 +6,7 @@ Reads configuration AND stage specs from config.yaml file.
 Includes comprehensive filtering, pagination below tables, an all catalog view,
 improved shuffle logic, UI enhancements, a Spec Tester tab,
 and an embedded Spotify player loaded using st.data_editor interaction.
-Uses sidebar radio for navigation. Reads GCS credentials from st.secrets.
+Uses sidebar radio for navigation. Relies on default GCS credentials for DuckDB.
 Added basic password protection.
 """
 
@@ -25,14 +25,11 @@ import json # For parsing service account key
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
 
-
-# --- The rest of the app runs only if password is correct ---
-
 # --- Load Configuration ---
 CONFIG_FILE = 'config.yaml'
 DEFINITIONS_FILE = 'Spotify_Data_Dictionary.csv'
 
-@st.cache_data(ttl=30) # Cache config reading for 30s
+@st.cache_data(ttl=30)
 def load_config():
     """Loads configuration and stage specs from the YAML file."""
     if not os.path.exists(CONFIG_FILE):
@@ -42,10 +39,14 @@ def load_config():
             config_data = yaml.safe_load(f)
             if not config_data or 'local_data_path' not in config_data or 'file_format' not in config_data or 'stage_specs' not in config_data:
                  return None, f"Configuration file '{CONFIG_FILE}' is missing required keys ('local_data_path', 'file_format', 'stage_specs')."
-            # *** Validate GCS path early ***
             gcs_path = config_data.get('local_data_path')
-            if not gcs_path or not gcs_path.startswith('gs://'):
-                 return None, f"Invalid GCS path found in config.yaml under 'local_data_path': '{gcs_path}'. Path must start with 'gs://'."
+            is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
+            if is_deployed and (not gcs_path or not gcs_path.startswith('gs://')):
+                 return None, f"Invalid GCS path found in config.yaml under 'local_data_path': '{gcs_path}'. Path must start with 'gs://' for deployment."
+            elif not is_deployed and gcs_path and not gcs_path.startswith('gs://') and not os.path.exists(gcs_path):
+                 return None, f"Local data file specified in config.yaml not found at: '{gcs_path}'"
+            elif not is_deployed and gcs_path and gcs_path.startswith('gs://'):
+                 print(f"Warning: GCS path specified in config.yaml while running locally. Ensure GCS access is configured.")
             return config_data, None
     except yaml.YAMLError as e: return None, f"Error parsing configuration file '{CONFIG_FILE}': {e}"
     except Exception as e: return None, f"Error reading configuration file '{CONFIG_FILE}': {e}"
@@ -75,14 +76,12 @@ definitions = load_definitions(DEFINITIONS_FILE)
 # --- App Configuration ---
 if app_config is None: st.error(config_error_msg); st.error("Stopping execution."); st.stop()
 
-# *** Use GCS Path from config ***
-GCS_DATA_PATH = app_config.get('local_data_path') # Variable name kept for consistency, but holds GCS path
+DATA_PATH = app_config.get('local_data_path') # Holds GCS or Local path
 FILE_FORMAT = app_config.get('file_format', 'parquet').lower()
 DEFAULT_SONGS_PER_PAGE = app_config.get('songs_per_page', 50)
 DEFAULT_MAX_SCORE = app_config.get('default_max_score_filter', 100.0)
 STAGE_SPECS = app_config.get('stage_specs', {})
 
-# Define features
 if STAGE_SPECS:
     first_stage_data = next(iter(STAGE_SPECS.values()))
     ALL_FEATURES_FROM_SPEC = [k for k in first_stage_data if k != 'stage_number']
@@ -104,7 +103,7 @@ DEFAULT_TRACK_URI = "spotify:track:7GhIk7Il098yCjg4BQjzvb"
 # --- End Configuration ---
 
 # --- Initialize Session State ---
-# ... (keep existing initializations for pages, rows_per_page, test_song_id, shuffle, selected_track_uri, current_view) ...
+# ... (keep existing initializations) ...
 if 'explorer_page' not in st.session_state: st.session_state.explorer_page = 1
 if 'catalog_page' not in st.session_state: st.session_state.catalog_page = 1
 if 'explorer_rows_per_page' not in st.session_state: st.session_state.explorer_rows_per_page = DEFAULT_SONGS_PER_PAGE
@@ -119,48 +118,27 @@ if 'current_view' not in st.session_state: st.session_state.current_view = VIEWS
 # --- DuckDB Setup ---
 @st.cache_resource
 def get_duckdb_connection():
-    """Establishes a connection to DuckDB and configures GCS access using secrets."""
-    # Check for GCS credentials in secrets
-    # Key name must match the one used in Streamlit Cloud secrets settings
-    gcs_key_json_content = st.secrets.get("GCS_SERVICE_ACCOUNT_KEY_JSON")
+    """Establishes a connection to DuckDB and attempts default GCS access."""
+    is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
+    print(f"[{time.time()}] Attempting DuckDB connection. Deployed: {is_deployed}")
 
-    if not gcs_key_json_content or not gcs_key_json_content.strip():
-        st.error("GCS Service Account Key not found or empty in Streamlit secrets. Configure secrets in Streamlit Cloud settings or locally in .streamlit/secrets.toml.")
-        return None
-
-    try:
-        # Validate JSON structure early
-        json.loads(gcs_key_json_content)
-    except json.JSONDecodeError:
-        st.error("GCS Service Account Key in secrets is not valid JSON.")
-        return None
+    # *** REMOVED early check for GCS key in secrets ***
 
     try:
         con = duckdb.connect(database=':memory:', read_only=False)
         print(f"[{time.time()}] DuckDB connection established.")
 
-        # Install and load GCS extension
-        con.sql("INSTALL gcs;")
-        con.sql("LOAD gcs;")
-        print(f"[{time.time()}] DuckDB GCS extension loaded.")
-
-        # Configure GCS credentials using the service account key from secrets
-        # Use DuckDB's CREATE SECRET feature
-        # Replace single quotes within the JSON string to avoid SQL errors
-        safe_key_content = gcs_key_json_content.replace("'", "''")
-        con.sql(f"""
-            CREATE SECRET streamlit_gcs_secret (
-                TYPE GCS,
-                PROVIDER SERVICE_ACCOUNT,
-                SERVICE_ACCOUNT_JSON '{safe_key_content}'
-            );
-        """)
-        print(f"[{time.time()}] Created DuckDB GCS secret from st.secrets.")
+        # Install and load GCS extension only if needed
+        if DATA_PATH.startswith("gs://"):
+            con.sql("INSTALL gcs;")
+            con.sql("LOAD gcs;")
+            print(f"[{time.time()}] DuckDB GCS extension loaded.")
+            # *** REMOVED explicit CREATE SECRET call ***
+            print(f"[{time.time()}] Relying on default GCS credential provider chain (ADC, Env Vars, etc.).")
         return con
 
     except Exception as e:
         st.error(f"Error connecting to DuckDB or configuring GCS: {e}")
-        # Attempt to close connection if partially opened
         if 'con' in locals() and con:
             try: con.close()
             except: pass
@@ -175,21 +153,20 @@ def get_read_options():
     read_options = ""
     if FILE_FORMAT == 'csv':
         read_options = ", header=true"
-        # Use GCS path from config
-        if app_config['local_data_path'].endswith('.gz'): # Check GCS path
-            read_options += ", compression='gzip'"
+        if app_config['local_data_path'].endswith('.gz'): read_options += ", compression='gzip'"
     return read_options
 
 def read_from_source():
-    """Helper function to read from the GCS file source defined in config."""
+    """Helper function to read from the GCS/Local file source defined in config."""
     read_function = f"read_{FILE_FORMAT}"
     read_options = get_read_options()
-    # Use GCS path from config
-    # Use the created secret for authentication
-    return f"{read_function}('{app_config['local_data_path']}'{read_options}, secret='streamlit_gcs_secret')"
+    path = app_config['local_data_path'] # Holds GCS or Local path
+    # *** REMOVED secret_option from here ***
+    # DuckDB will use default provider chain if path is gs://
+    return f"{read_function}('{path}'{read_options})"
 
 # --- The rest of the functions (get_stage_mapping, get_feature_ranges, etc.)
-# --- remain largely the same, as they use read_from_source() which now points to GCS ---
+# --- remain largely the same, as they use read_from_source() which now handles GCS/Local ---
 # --- Re-paste all function definitions here from the previous version ---
 # ... (get_stage_mapping, get_feature_ranges, get_discrete_feature_values) ...
 # ... (build_where_clause, count_songs, query_paged_songs) ...
@@ -448,8 +425,7 @@ def run_shuffle_generation():
         with st.spinner("Generating journey..."):
             st.session_state.shuffle_df, st.session_state.shuffle_fallback = get_shuffle_journey_pandas(candidate_songs_df, stage_mapping)
         print(f"[{time.time()}] Shuffle data stored in session state via callback (Pandas).") # DEBUG
-        # *** Explicitly set view AFTER generation ***
-        st.session_state.current_view = "Shuffle Journey"
+        st.session_state.current_view = "Shuffle Journey" # Explicitly set view after generation
     else:
         st.session_state.shuffle_df = None; st.session_state.shuffle_fallback = False
         error_msg = "Cannot generate shuffle: ";
@@ -472,13 +448,14 @@ def set_selected_track(uri):
 # Check prerequisites
 if not con: st.error("Could not establish DuckDB connection. Stopping."); st.stop()
 # *** Check GCS Path from config ***
-if not GCS_DATA_PATH or not os.path.exists(GCS_DATA_PATH): # Check existence for local testing if needed
-     if not GCS_DATA_PATH.startswith("gs://"): # If not GCS path, assume local and check
-        st.error(f"Error: Data file not found at '{GCS_DATA_PATH}'. Please check the path in config.yaml. Stopping.")
-        st.stop()
-     # If it IS a GCS path, we can't check existence easily here, proceed and let DuckDB handle errors
-     elif GCS_DATA_PATH.startswith("gs://"):
-         print(f"Attempting to read from GCS path: {GCS_DATA_PATH}")
+if not DATA_PATH: # Check if path is defined
+     st.error("Data path ('local_data_path') not defined in config.yaml. Stopping.")
+     st.stop()
+elif not DATA_PATH.startswith("gs://") and not os.path.exists(DATA_PATH): # Check existence only if local
+     st.error(f"Error: Data file not found at '{DATA_PATH}'. Please check the path in config.yaml. Stopping.")
+     st.stop()
+elif DATA_PATH.startswith("gs://"):
+     print(f"Attempting to read from GCS path: {DATA_PATH}")
 
 
 if not STAGE_SPECS: st.error(f"Error: Stage specifications not loaded correctly from '{CONFIG_FILE}'. Stopping."); st.stop()
@@ -598,6 +575,11 @@ with st.sidebar:
 # --- Main Content Area (Controlled by Sidebar Radio) ---
 # Display content based on the selected view in session state
 current_view = st.session_state.current_view
+
+# Ensure connection is available before proceeding
+if not con:
+     st.error("Database connection failed. Cannot display content.")
+     st.stop()
 
 if current_view == "Stage Explorer":
     # st.header("🔍 Stage Explorer") # Removed header
