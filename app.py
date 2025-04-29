@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Streamlit app to explore and shuffle songs classified by stage,
-loading data directly from a Hugging Face dataset URL using DuckDB.
+loading data directly from a public HTTPS URL (like S3 or HF) using DuckDB.
 Reads configuration AND stage specs from config.yaml file.
 Includes comprehensive filtering, pagination below tables, an all catalog view,
 improved shuffle logic, UI enhancements, a Spec Tester tab,
 and an embedded Spotify player loaded using st.data_editor interaction.
-Uses sidebar radio for navigation. Fixed path check for HF URLs.
+Uses sidebar radio for navigation. Corrected path validation for URLs.
 Added basic password protection.
 """
 
@@ -21,7 +21,7 @@ import time # For debugging timestamp
 import csv # Import csv library again
 import re # For extracting track ID
 import json # For parsing service account key
-# Removed GCS library imports
+# Removed GCS/AWS specific libraries
 
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
@@ -57,15 +57,21 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f: config_data = yaml.safe_load(f)
         if not config_data or 'local_data_path' not in config_data or 'file_format' not in config_data or 'stage_specs' not in config_data:
              return None, f"Config file '{CONFIG_FILE}' missing required keys ('local_data_path', 'file_format', 'stage_specs')."
-        # *** Validate URL/Local path ***
+
+        # *** Corrected Path Validation Logic ***
         data_path = config_data.get('local_data_path')
         is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
+        is_url = data_path and (data_path.startswith('https://') or data_path.startswith('http://'))
+
         if not data_path:
              return None, "Missing 'local_data_path' in config file."
-        if not data_path.startswith('https://') and not data_path.startswith('http://') and not os.path.exists(data_path):
-             # Only check os.path.exists if it's NOT a URL
+        # If deployed, path MUST be a URL
+        if is_deployed and not is_url:
+             return None, f"Invalid path in config.yaml for deployment: '{data_path}'. Must be HTTPS URL."
+        # If running locally and path is NOT a URL, check if file exists
+        if not is_deployed and not is_url and not os.path.exists(data_path):
              return None, f"Local data file specified in config.yaml not found at: '{data_path}'"
-        # No specific validation needed for HTTPS URLs here, DuckDB will handle it
+
         return config_data, None
     except yaml.YAMLError as e: return None, f"Error parsing config file '{CONFIG_FILE}': {e}"
     except Exception as e: return None, f"Error reading config file '{CONFIG_FILE}': {e}"
@@ -490,12 +496,10 @@ def set_selected_track(uri):
 if not con: st.error("Could not establish DuckDB connection. Stopping."); st.stop()
 # Check DATA_PATH
 if not DATA_PATH: st.error("Data path not defined in config.yaml."); st.stop()
-# Check if it's a GCS path or a local file that exists
-if not DATA_PATH.startswith("s3://") and not DATA_PATH.startswith("http://") and not DATA_PATH.startswith("https://") and not os.path.exists(DATA_PATH): # Check S3/HTTP prefix or local path
+# *** Corrected path check for URLs ***
+if not DATA_PATH.startswith("http://") and not DATA_PATH.startswith("https://") and not os.path.exists(DATA_PATH):
      st.error(f"Error: Local data file not found at '{DATA_PATH}'. Check config.yaml.")
      st.stop()
-elif DATA_PATH.startswith("s3://"):
-     print(f"Attempting to read from S3 path: {DATA_PATH}") # Log S3 path usage
 elif DATA_PATH.startswith("http"):
      print(f"Attempting to read from HTTPS path: {DATA_PATH}") # Log HTTPS path usage
 
@@ -623,11 +627,10 @@ if not con:
      st.error("Database connection failed. Cannot display content.")
      st.stop()
 
-# Check if data file path is set (either local or GCS for local testing)
-# This check might be less critical now if relying on DuckDB errors
-# if not st.session_state.get('local_data_file_path'):
-#      st.error("Data file path could not be determined. Stopping.")
-#      st.stop()
+# Check if data file path is set (either local or URL)
+if not DATA_PATH:
+     st.error("Data path not defined in config.yaml. Stopping.")
+     st.stop()
 
 
 if current_view == "Stage Explorer":
@@ -824,27 +827,32 @@ elif current_view == "Spec Tester":
     st.divider()
     st.session_state.test_song_id = st.text_input("Enter Song ID or partial name to test:", value=st.session_state.test_song_id, key="test_song_input", placeholder="e.g., 4iV5W9uYEdYUVa79Axb7Rh or Bohemian Rhapsody")
     if st.session_state.test_song_id:
-        # Find song in the main DataFrame (loaded from HF)
+        search_term = st.session_state.test_song_id.replace("'", "''")
+        cols_to_select_test = ['id', 'name', 'artists'] + ALL_FEATURES_FROM_SPEC
+        unique_cols_to_select_test = []; seen_test = set()
+        for col in cols_to_select_test:
+             if col.lower() not in seen_test:
+                  try: con.execute(f"SELECT \"{col}\" FROM {read_from_source()} LIMIT 1;"); unique_cols_to_select_test.append(f"\"{col}\""); seen_test.add(col.lower())
+                  except Exception: print(f"Warning: Column '{col}' not found in file for spec tester query."); pass
+        if not unique_cols_to_select_test: st.error("Could not find required columns in the data file for testing."); st.stop()
+        find_query = f"""SELECT {', '.join(unique_cols_to_select_test)} FROM {read_from_source()} WHERE id = '{search_term}' OR lower(name) LIKE lower('%{search_term}%') LIMIT 50;"""
         try:
-            # Search by song_id first (more reliable)
-            possible_songs_df = main_df[main_df['song_id'] == st.session_state.test_song_id]
-            if possible_songs_df.empty:
-                 # If not found by ID, search by name (case-insensitive)
-                 possible_songs_df = main_df[main_df['song_name'].str.contains(st.session_state.test_song_id, case=False, na=False)]
-
+            possible_songs_df = con.query(find_query).df()
             if not possible_songs_df.empty:
                 if len(possible_songs_df) > 1:
-                     possible_songs_df['display_option'] = possible_songs_df.apply(lambda row: f"{row['song_name']} by {row.get('artists','Unknown')} (ID: {row['song_id']})", axis=1)
+                     possible_songs_df['display_option'] = possible_songs_df.apply(lambda row: f"{row['name']} by {row.get('artists','Unknown')} (ID: {row['id']})", axis=1)
                      selected_song_display = st.selectbox("Select the exact song:", options=possible_songs_df['display_option'].tolist(), index=0)
                      try: selected_song_id = selected_song_display.split("(ID: ")[1].replace(")", "")
                      except IndexError: st.error("Could not parse selected song ID."); st.stop()
-                     song_features_series = possible_songs_df[possible_songs_df['song_id'] == selected_song_id].iloc[0]
+                     song_features_series = possible_songs_df[possible_songs_df['id'] == selected_song_id].iloc[0]
                 else:
-                     song_features_series = possible_songs_df.iloc[0]; selected_song_id = song_features_series['song_id']
-                     st.write(f"Found song: **{song_features_series['song_name']}** by {song_features_series.get('artists','Unknown')}")
-
-                # Extract features needed for calculation
-                song_features_dict = song_features_series[ALL_FEATURES_FROM_SPEC].to_dict()
+                     song_features_series = possible_songs_df.iloc[0]; selected_song_id = song_features_series['id']
+                     st.write(f"Found song: **{song_features_series['name']}** by {song_features_series.get('artists','Unknown')}")
+                song_features_dict = {}
+                for feature in ALL_FEATURES_FROM_SPEC:
+                    actual_feature_col = next((col for col in song_features_series.index if col.lower() == feature.lower()), None)
+                    if actual_feature_col: song_features_dict[feature] = song_features_series[actual_feature_col]
+                    else: print(f"Warning: Feature '{feature}' from spec not found in song data for testing."); song_features_dict[feature] = None
                 st.write("Calculating scores based on current specs...")
                 calculated_scores_df = calculate_single_song_scores(song_features_dict, STAGE_SPECS)
                 if not calculated_scores_df.empty:
@@ -855,5 +863,5 @@ elif current_view == "Spec Tester":
                     with st.expander("View Song's Audio Features Used for Calculation"): st.json({k: v for k, v in song_features_dict.items() if pd.notna(v) and k in ALL_FEATURES_FROM_SPEC})
                 else: st.warning("Could not calculate scores for this song with the current specs.")
             else: st.warning(f"No song found matching ID or name '{st.session_state.test_song_id}'.")
-        except Exception as e: st.error(f"Error finding or testing song: {e}")
+        except Exception as e: st.error(f"Error finding or testing song: {e}"); st.error(f"Query attempted: {find_query}")
 
