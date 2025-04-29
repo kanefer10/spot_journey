@@ -1,0 +1,6 @@
+streamlit
+duckdb
+pandas
+pyyaml
+google-cloud-storage
+gcsfs

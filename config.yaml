@@ -1,0 +1,126 @@
+local_data_path: 'gs://innerdance/songs_data.parquet' # <<< UPDATE THIS PATH if needed
+file_format: 'parquet'
+songs_per_page: 50
+default_max_score_filter: 100.0
+stage_specs:
+  safety: # Stage 1
+    stage_number: 1
+    tempo: [4.00, 85.00]
+    energy: [0.0, 0.1]
+    danceability: [0.0, 0.25]
+    acousticness: [0.7, 1.0]
+    instrumentalness: [0.4, 0.9]
+    valence: [0.0, 0.4] # Note: This range is very wide (0-1) for a 'safety' stage, might need adjustment
+    loudness: [-60.0, -20.0]
+    speechiness: [0.0, 0.1]
+  dissatisfaction: # Stage 2
+    stage_number: 2
+    tempo: [60.00, 90.00]
+    energy: [0.2, 0.30]
+    danceability: [0.25, 0.50]
+    acousticness: [0.6, 1.0]
+    instrumentalness: [0.524, 0.924]
+    valence: [0.0, 0.5] # Note: This valence range is extremely narrow and low
+    loudness: [-18.136, -3.136]
+    speechiness: [0.0, 0.1]
+  threshold: # Stage 3
+    stage_number: 3
+    tempo: [114.993, 134.993]
+    energy: [0.696, 1.0]
+    danceability: [0.226, 0.626]
+    acousticness: [0.0, 0.2755]
+    instrumentalness: [0.599, 1.0]
+    valence: [0.034, 0.434]
+    loudness: [-16.139, -1.139]
+    speechiness: [0.0, 0.6]
+  purgation release: # Stage 4
+    stage_number: 4
+    tempo: [86.057, 106.057]
+    energy: [0.142, 0.542]
+    danceability: [0.086, 0.486]
+    acousticness: [0.0, 0.354]
+    instrumentalness: [0.496, 0.896]
+    valence: [0.0, 0.339]
+    loudness: [-20.242, -5.242]
+    speechiness: [0.0, 0.5]
+  disintegration: # Stage 5
+    stage_number: 5
+    tempo: [93.331, 150.453]
+    energy: [0.0, 0.7482]
+    danceability: [0.0, 0.7372]
+    acousticness: [0.298, 1.0]
+    instrumentalness: [0.362, 1.0]
+    valence: [0.0, 0.6057]
+    loudness: [-48.440, -5.598]
+    speechiness: [0.0, 0.5]
+  awakening: # Stage 6
+    stage_number: 6
+    tempo: [81.085, 101.085]
+    energy: [0.0, 0.2906]
+    danceability: [0.034, 0.434]
+    acousticness: [0.732, 1.0]
+    instrumentalness: [0.648, 1.0]
+    valence: [0.0, 0.2344]
+    loudness: [-32.881, -17.881]
+    speechiness: [0.0, 0.33]
+  illumination: # Stage 7
+    stage_number: 7
+    tempo: [74.208, 94.208]
+    energy: [0.092, 0.492]
+    danceability: [0.118, 0.518]
+    acousticness: [0.741, 1.0]
+    instrumentalness: [0.733, 1.0]
+    valence: [0.0, 0.317]
+    loudness: [-28.838, -13.838]
+    speechiness: [0.0, 0.33]
+  choice: # Stage 8
+    stage_number: 8
+    tempo: [113.012, 133.012]
+    energy: [0.5255, 0.9255]
+    danceability: [0.2265, 0.6265]
+    acousticness: [0.0, 0.3848]
+    instrumentalness: [0.319, 0.719]
+    valence: [0.316, 0.716]
+    loudness: [-15.308, -0.308]
+    speechiness: [0.0, 0.6]
+  strength/failure: # Stage 9
+    stage_number: 9
+    tempo: [123.963, 143.963]
+    energy: [0.595, 1.0]
+    danceability: [0.065, 0.465]
+    acousticness: [0.0, 0.210]
+    instrumentalness: [0.223, 0.623]
+    valence: [0.0, 0.397]
+    loudness: [-14.467, 8.00] # Note: Max loudness is positive, unusual for Spotify dB scale
+    speechiness: [0.0, 0.66]
+  dark night of the soul: # Stage 10
+    stage_number: 10
+    tempo: [61.991, 105.931]
+    energy: [0.0, 0.7704]
+    danceability: [0.0, 0.5754]
+    acousticness: [0.350, 1.0]
+    instrumentalness: [0.406, 1.0]
+    valence: [0.0, 0.4767]
+    loudness: [-35.646, -2.690]
+    speechiness: [0.0, 0.4]
+  oneness: # Stage 11
+    stage_number: 11
+    tempo: [85.01, 115.01]
+    energy: [0.025, 0.425]
+    danceability: [0.0, 0.367]
+    acousticness: [0.570, 0.970]
+    instrumentalness: [0.725, 1.0]
+    valence: [0.5, 1.00] # Note: High valence range
+    loudness: [-26.39, -11.39]
+    speechiness: [0.5, 1.0] # Note: High speechiness range
+  reintegration: # Stage 12
+    stage_number: 12
+    tempo: [4.00, 85.00]
+    energy: [0.0, 0.1]
+    danceability: [0.0, 0.25]
+    acousticness: [0.7, 1.0]
+    instrumentalness: [0.4, 0.9]
+    valence: [0.0, 0.4] # Note: Very wide valence range
+    loudness: [-60.0, -20.0]
+    speechiness: [0.0, 0.1]
+
