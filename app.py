@@ -6,7 +6,7 @@ Reads configuration AND stage specs from config.yaml file.
 Includes comprehensive filtering, pagination below tables, an all catalog view,
 improved shuffle logic, UI enhancements, a Spec Tester tab,
 and an embedded Spotify player loaded using st.data_editor interaction.
-Uses sidebar radio for navigation. Reads individual GCS credentials from st.secrets
+Uses sidebar radio for navigation. Reads INDIVIDUAL GCS credentials from st.secrets
 and configures DuckDB via SET commands.
 Added basic password protection.
 """
@@ -21,9 +21,7 @@ import yaml # Import YAML library
 import time # For debugging timestamp
 import csv # Import csv library again
 import re # For extracting track ID
-# import json # No longer needed for parsing key
-# import tempfile # No longer needed
-# import atexit # No longer needed
+import json # For parsing service account key
 # Removed GCS library imports
 
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
@@ -548,7 +546,7 @@ def set_selected_track(uri):
 
 # Check prerequisites
 if not con: st.error("Could not establish DuckDB connection. Stopping."); st.stop()
-# *** Corrected path check using LOCAL_DATA_PATH ***
+# Check DATA_PATH
 if not LOCAL_DATA_PATH: st.error("Data path ('local_data_path') not defined in config.yaml. Stopping."); st.stop()
 # Check if it's a GCS path or a local file that exists
 if not LOCAL_DATA_PATH.startswith("gs://") and not os.path.exists(LOCAL_DATA_PATH):
