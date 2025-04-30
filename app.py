@@ -9,7 +9,6 @@ and an embedded Spotify player loaded using st.data_editor interaction.
 Uses sidebar radio for navigation. Reads GCS credentials from st.secrets
 and uses a temporary key file for DuckDB authentication.
 Added basic password protection.
-Fixes DATA_PATH NameError.
 """
 
 import streamlit as st
@@ -24,6 +23,7 @@ import csv # Import csv library again
 import re # For extracting track ID
 import json # For parsing service account key
 import tempfile # To create temporary file for GCS key
+import atexit # To help clean up temp file
 
 # --- Page Configuration (MUST be the first Streamlit command after imports) ---
 st.set_page_config(layout="wide", page_title="Sound Journey Explorer")
@@ -142,16 +142,33 @@ if 'current_view' not in st.session_state: st.session_state.current_view = VIEWS
 
 
 # --- DuckDB Setup ---
+# Global variable to hold the temp file path
+_temp_key_file_path = None
+
+def cleanup_temp_key_file():
+    """Function to remove the temporary key file on exit."""
+    global _temp_key_file_path
+    if _temp_key_file_path and os.path.exists(_temp_key_file_path):
+        try:
+            os.remove(_temp_key_file_path)
+            print(f"[{time.time()}] Cleaned up temporary key file: {_temp_key_file_path}")
+        except Exception as e:
+            print(f"[{time.time()}] Error cleaning up temp key file {_temp_key_file_path}: {e}")
+
+# Register cleanup function to run when the script exits
+atexit.register(cleanup_temp_key_file)
+
 @st.cache_resource
 def get_duckdb_connection():
     """Establishes a connection to DuckDB and configures GCS access using secrets via temp file."""
+    global _temp_key_file_path # Allow modification of global variable
     is_deployed = "STREAMLIT_SERVER_RUNNING_MODE" in os.environ
     print(f"[{time.time()}] Attempting DuckDB connection. Deployed: {is_deployed}")
 
-    # Check for GCS credentials in secrets if needed (path starts with gs://)
     gcs_key_json_content = None
-    temp_key_file_path = None
-    # *** Use LOCAL_DATA_PATH for check ***
+    temp_key_file_path_local = None # Local variable for this function scope
+
+    # Check for GCS credentials in secrets if needed (path starts with gs://)
     if LOCAL_DATA_PATH.startswith("gs://"):
         gcs_key_json_content = st.secrets.get("GCS_SERVICE_ACCOUNT_KEY_JSON")
         if not gcs_key_json_content or not gcs_key_json_content.strip():
@@ -161,23 +178,28 @@ def get_duckdb_connection():
             # Validate JSON structure early
             json.loads(gcs_key_json_content)
             # Create a temporary file to store the key
+            # delete=False is important so the file persists until cleanup
             with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as temp_key_file:
                 temp_key_file.write(gcs_key_json_content)
-                temp_key_file_path = temp_key_file.name # Get the path
-            print(f"[{time.time()}] GCS key written to temporary file: {temp_key_file_path}")
+                temp_key_file_path_local = temp_key_file.name # Get the path
+            _temp_key_file_path = temp_key_file_path_local # Store path globally for cleanup
+            print(f"[{time.time()}] GCS key written to temporary file: {temp_key_file_path_local}")
         except json.JSONDecodeError:
             st.error("GCS Service Account Key in secrets is not valid JSON.")
             return None
         except Exception as e:
              st.error(f"Error writing GCS key to temporary file: {e}")
+             if temp_key_file_path_local and os.path.exists(temp_key_file_path_local):
+                 try: os.remove(temp_key_file_path_local) # Clean up if write failed partially
+                 except: pass
              return None
 
+    # --- Connect to DuckDB ---
     try:
         con = duckdb.connect(database=':memory:', read_only=False)
         print(f"[{time.time()}] DuckDB connection established.")
 
         # Install and load GCS extension only if needed
-        # *** Use LOCAL_DATA_PATH for check ***
         if LOCAL_DATA_PATH.startswith("gs://"):
             try:
                 con.sql("INSTALL gcs;")
@@ -185,11 +207,20 @@ def get_duckdb_connection():
                 print(f"[{time.time()}] DuckDB GCS extension loaded.")
 
                 # Configure GCS credentials using the temporary key file path
-                if temp_key_file_path:
-                    # Escape backslashes for Windows paths if running locally, though unlikely needed for tempfile path
-                    safe_key_path = temp_key_file_path.replace('\\', '\\\\')
+                if temp_key_file_path_local:
+                    safe_key_path = temp_key_file_path_local.replace('\\', '\\\\')
                     # Use DuckDB SET commands to point to the key file
                     con.sql(f"SET gcs_service_account_key_file='{safe_key_path}';")
+                    # Optionally set project ID if needed by GCS extension/provider
+                    try:
+                         key_data = json.loads(gcs_key_json_content)
+                         project_id = key_data.get('project_id')
+                         if project_id:
+                              con.sql(f"SET gcs_project_id='{project_id}';")
+                              print(f"[{time.time()}] Set DuckDB gcs_project_id.")
+                    except Exception as e_proj:
+                         print(f"Warning: Could not extract project_id from key file: {e_proj}")
+
                     print(f"[{time.time()}] Configured DuckDB GCS credentials using key file: {safe_key_path}")
                 else:
                     # This case should not happen if GCS path is used and key is required
@@ -198,10 +229,7 @@ def get_duckdb_connection():
             except Exception as e:
                  st.error(f"Failed to install/load DuckDB GCS extension or set credentials: {e}")
                  con.close()
-                 # Clean up temp file if it exists and connection failed
-                 if temp_key_file_path and os.path.exists(temp_key_file_path):
-                     try: os.remove(temp_key_file_path)
-                     except: pass
+                 cleanup_temp_key_file() # Attempt cleanup
                  return None
 
         return con
@@ -211,10 +239,7 @@ def get_duckdb_connection():
         if 'con' in locals() and con:
             try: con.close()
             except: pass
-        # Clean up temp file if it exists and connection failed
-        if temp_key_file_path and os.path.exists(temp_key_file_path):
-            try: os.remove(temp_key_file_path)
-            except: pass
+        cleanup_temp_key_file() # Attempt cleanup
         return None
 
 con = get_duckdb_connection()
@@ -226,7 +251,6 @@ def get_read_options():
     read_options = ""
     if FILE_FORMAT == 'csv':
         read_options = ", header=true"
-        # *** Use LOCAL_DATA_PATH for check ***
         if LOCAL_DATA_PATH.endswith('.gz'): # Check path for compression
             read_options += ", compression='gzip'"
     return read_options
@@ -235,7 +259,6 @@ def read_from_source():
     """Helper function to read from the GCS/Local file source defined in config."""
     read_function = f"read_{FILE_FORMAT}"
     read_options = get_read_options()
-    # *** Use LOCAL_DATA_PATH for path ***
     path = app_config['local_data_path'] # This holds GCS or Local path
     # *** REMOVED secret_option as credentials are set globally via SET command ***
     # Escape single quotes in path just in case
