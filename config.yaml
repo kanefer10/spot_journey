@@ -1,5 +1,3 @@
-local_data_path: 'gs://innerdance/songs_data'
-file_format: 'parquet'
 songs_per_page: 50
 default_max_score_filter: 100.0
 stage_specs:
