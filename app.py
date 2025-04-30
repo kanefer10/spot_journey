@@ -9,6 +9,7 @@ and an embedded Spotify player loaded using st.data_editor interaction.
 Uses sidebar radio for navigation. Reads GCS credentials from st.secrets
 and uses a temporary key file for DuckDB authentication.
 Added basic password protection.
+Fixes DATA_PATH NameError.
 """
 
 import streamlit as st
@@ -100,7 +101,8 @@ definitions = load_definitions(DEFINITIONS_FILE)
 # --- App Configuration ---
 if app_config is None: st.error(config_error_msg); st.error("Stopping execution."); st.stop()
 
-DATA_PATH = app_config.get('local_data_path') # Holds GCS or Local path
+# *** Use consistent variable name LOCAL_DATA_PATH for the path ***
+LOCAL_DATA_PATH = app_config.get('local_data_path')
 FILE_FORMAT = app_config.get('file_format', 'parquet').lower()
 DEFAULT_SONGS_PER_PAGE = app_config.get('songs_per_page', 50)
 DEFAULT_MAX_SCORE = app_config.get('default_max_score_filter', 100.0)
@@ -149,7 +151,8 @@ def get_duckdb_connection():
     # Check for GCS credentials in secrets if needed (path starts with gs://)
     gcs_key_json_content = None
     temp_key_file_path = None
-    if DATA_PATH.startswith("gs://"):
+    # *** Use LOCAL_DATA_PATH for check ***
+    if LOCAL_DATA_PATH.startswith("gs://"):
         gcs_key_json_content = st.secrets.get("GCS_SERVICE_ACCOUNT_KEY_JSON")
         if not gcs_key_json_content or not gcs_key_json_content.strip():
             st.error("GCS Service Account Key not found or empty in Streamlit secrets.")
@@ -174,7 +177,8 @@ def get_duckdb_connection():
         print(f"[{time.time()}] DuckDB connection established.")
 
         # Install and load GCS extension only if needed
-        if DATA_PATH.startswith("gs://"):
+        # *** Use LOCAL_DATA_PATH for check ***
+        if LOCAL_DATA_PATH.startswith("gs://"):
             try:
                 con.sql("INSTALL gcs;")
                 con.sql("LOAD gcs;")
@@ -222,7 +226,8 @@ def get_read_options():
     read_options = ""
     if FILE_FORMAT == 'csv':
         read_options = ", header=true"
-        if DATA_PATH.endswith('.gz'): # Check path for compression
+        # *** Use LOCAL_DATA_PATH for check ***
+        if LOCAL_DATA_PATH.endswith('.gz'): # Check path for compression
             read_options += ", compression='gzip'"
     return read_options
 
@@ -230,6 +235,7 @@ def read_from_source():
     """Helper function to read from the GCS/Local file source defined in config."""
     read_function = f"read_{FILE_FORMAT}"
     read_options = get_read_options()
+    # *** Use LOCAL_DATA_PATH for path ***
     path = app_config['local_data_path'] # This holds GCS or Local path
     # *** REMOVED secret_option as credentials are set globally via SET command ***
     # Escape single quotes in path just in case
@@ -258,7 +264,7 @@ def get_feature_ranges(_con, features):
     ranges = {}
     try:
         # Use DESCRIBE only if it's likely a local file for performance
-        if not DATA_PATH.startswith("gs://"):
+        if not LOCAL_DATA_PATH.startswith("gs://"): # *** Use LOCAL_DATA_PATH ***
              temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
         else: # Assume all features exist for remote files to avoid slow DESCRIBE over GCS
              available_columns = [f.lower() for f in features]
@@ -303,7 +309,7 @@ def get_discrete_feature_values(_con, features):
     values = {}
     try:
         # Avoid DESCRIBE over GCS if possible
-        if not DATA_PATH.startswith("gs://"):
+        if not LOCAL_DATA_PATH.startswith("gs://"): # *** Use LOCAL_DATA_PATH ***
             temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].str.lower().tolist()
         else:
              available_columns = [f.lower() for f in features] # Assume columns exist
@@ -370,7 +376,7 @@ def query_paged_songs(_con, stage_num, filters, limit, offset, feature_ranges_lo
     full_where_clause = build_where_clause(stage_num, filters, feature_ranges_local)
     try:
         # Avoid DESCRIBE over GCS if possible
-        if not DATA_PATH.startswith("gs://"):
+        if not LOCAL_DATA_PATH.startswith("gs://"): # *** Use LOCAL_DATA_PATH ***
              temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
         else: # Assume columns exist based on lists
              available_columns = ['id', 'name', 'artists', 'album', 'track_uri', 'stage_number', 'stage_name', 'stage_rank', 'total_mismatch_score'] + ALL_AUDIO_FEATURES
@@ -408,7 +414,7 @@ def load_candidate_songs(_con, rank_threshold=1):
     cols_for_shuffle = ['id', 'name', 'artists', 'album', 'track_uri', 'stage_number', 'stage_name', 'stage_rank', 'total_mismatch_score']
     try:
         # Avoid DESCRIBE over GCS if possible
-        if not DATA_PATH.startswith("gs://"):
+        if not LOCAL_DATA_PATH.startswith("gs://"): # *** Use LOCAL_DATA_PATH ***
              temp_df = _con.query(f"DESCRIBE SELECT * FROM {read_from_source()}").df(); available_columns = temp_df['column_name'].tolist()
         else: # Assume columns exist
              available_columns = cols_for_shuffle + ['key','mode','time_signature','danceability','energy','loudness','speechiness','acousticness','instrumentalness','liveness','valence','tempo']
@@ -536,14 +542,14 @@ def set_selected_track(uri):
 
 # Check prerequisites
 if not con: st.error("Could not establish DuckDB connection. Stopping."); st.stop()
-# Check DATA_PATH
-if not DATA_PATH: st.error("Data path not defined in config.yaml."); st.stop()
+# *** Corrected path check using LOCAL_DATA_PATH ***
+if not LOCAL_DATA_PATH: st.error("Data path ('local_data_path') not defined in config.yaml. Stopping."); st.stop()
 # Check if it's a GCS path or a local file that exists
-if not DATA_PATH.startswith("gs://") and not os.path.exists(DATA_PATH):
-     st.error(f"Error: Local data file not found at '{DATA_PATH}'. Check config.yaml.")
+if not LOCAL_DATA_PATH.startswith("gs://") and not os.path.exists(LOCAL_DATA_PATH):
+     st.error(f"Error: Local data file not found at '{LOCAL_DATA_PATH}'. Check config.yaml.")
      st.stop()
-elif DATA_PATH.startswith("gs://"):
-     print(f"Attempting to read from GCS path: {DATA_PATH}") # Log GCS path usage
+elif LOCAL_DATA_PATH.startswith("gs://"):
+     print(f"Attempting to read from GCS path: {LOCAL_DATA_PATH}") # Log GCS path usage
 
 if not STAGE_SPECS: st.error(f"Error: Stage specifications not loaded correctly from '{CONFIG_FILE}'. Stopping."); st.stop()
 
@@ -670,8 +676,9 @@ if not con:
      st.stop()
 
 # Check if data file path is set (either local or GCS for local testing)
-if not DATA_PATH:
-     st.error("Data path not defined in config.yaml. Stopping.")
+# *** Corrected path check using LOCAL_DATA_PATH ***
+if not LOCAL_DATA_PATH:
+     st.error("Data path ('local_data_path') not defined in config.yaml. Stopping.")
      st.stop()
 
 
