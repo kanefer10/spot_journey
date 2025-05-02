@@ -21,8 +21,9 @@ NUMERIC_FILTER_COLUMNS = [
     "TEMPO", "ENERGY", "ACOUSTICNESS", "INSTRUMENTALNESS",
     "KEY", "MODE", "DURATION_MS", "TIME_SIGNATURE"
 ]
-# Column for stable sorting (IMPORTANT for pagination!) - Use quoted if needed
-ORDER_BY_COLUMN = "NAME" # Assuming "NAME" is suitable for sorting
+# --- MODIFIED: Column for stable sorting ---
+# Ensure this column exists in your table!
+ORDER_BY_COLUMN = "TOTAL_MISMATCH_SCORE"
 TRACK_URI_COLUMN = "TRACK_URI" # Define the column name for Spotify URIs
 
 # --- Setup Logging (Optional) ---
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 # --- Helper Functions with Caching ---
 
-# --- MODIFIED: Function to connect to Snowflake using st.secrets ---
 @st.cache_resource(ttl=600) # Cache resource for 10 minutes
 def connect_to_snowflake():
     """Connects to Snowflake using credentials from st.secrets"""
@@ -54,8 +54,6 @@ def connect_to_snowflake():
         st.exception(e) # Show detailed error in app
         st.error(f"Error connecting to Snowflake. Check your credentials in st.secrets and Snowflake connection details. Error: {e}")
         st.stop()
-
-# --- REMOVED get_active_session() function ---
 
 @st.cache_data(ttl=3600) # Cache distinct stages for 1 hour
 def get_distinct_stages_with_numbers(_session, table_name):
@@ -220,105 +218,92 @@ def get_track_id_from_uri(uri):
 
 # --- Main App ---
 
-# --- MODIFIED: Connect using the new function ---
+# Connect to Snowflake
 session = connect_to_snowflake()
 
-# Initialize session state for the selected track URI
+# Initialize session state
 if 'selected_track_uri' not in st.session_state:
     st.session_state.selected_track_uri = None
-# Initialize state to store the dataframe for the current page
-if 'current_page_df' not in st.session_state:
-    st.session_state.current_page_df = pd.DataFrame()
+# Store the original dataframe for the current page to access URI later
+if 'current_page_df_orig' not in st.session_state:
+    st.session_state.current_page_df_orig = pd.DataFrame()
+# Key for the data editor state
+EDITOR_KEY = "song_editor"
 
 
 # Set up the rest of the UI
 st.title("🎵 Songs Explorer")
-st.markdown("Use filters in the sidebar to explore songs and their features. Select a song below the table to play a preview.")
+st.markdown("Use filters in the sidebar to explore songs and their features. Check 'Play' next to a song to load a preview.")
 
-# --- Spotify Player Area (Placeholder - will be filled later) ---
-spotify_player_area = st.empty()
-
-# --- Placeholder for Song Selection ---
-song_selector_area = st.empty()
-
-# --- Sidebar Filters ---
-selected_stage_filter_value = None # Initialize variable to store the actual filter value (STAGE_NAME)
-slider_filters = {} # Initialize dictionary
-
+# --- Sidebar ---
 with st.sidebar:
     st.header("Filters")
 
-    # --- Stage Name Filter (Moved to Top) ---
-    # Pass the established session object to the helper function
+    # --- Spotify Player Area ---
+    st.markdown("#### Now Playing Preview")
+    spotify_player_area = st.empty() # Placeholder for the player
+
+    # --- Stage Name Filter ---
     stage_options_data = get_distinct_stages_with_numbers(session, BASE_TABLE_NAME)
-    # Only show selectbox if options were successfully fetched (more than just the "All" option)
     if len(stage_options_data) > 1:
-        # Use format_func to display the second element (display_value) of the tuple
         selected_stage_filter_value = st.selectbox(
             "Stage Name",
-            options=stage_options_data, # Provide the list of (filter_value, display_value) tuples
-            format_func=lambda option: option[1], # Function to display the second element
-            index=0, # Default to the first option ("All")
+            options=stage_options_data,
+            format_func=lambda option: option[1],
+            index=0,
             key="stage_select"
-        )[0] # Get the first element (filter_value) which is the actual STAGE_NAME
+        )[0]
     else:
-        # Warning is already shown in the helper function if fetching failed
+        selected_stage_filter_value = None
         st.info("Stage Name filter unavailable.")
 
+    # --- Search by track name ---
+    track_search = st.text_input("Search by Track Name (contains)", key="track_search_input")
 
-    # --- Search by track name (NAME column) - Case-insensitive ---
-    track_search = st.text_input("Search by Track Name (contains)", key="track_search_input") # Added key
-
-
-    # --- Sliders for numerical filters within an expander ---
-    st.markdown("---") # Separator
-    with st.expander("Numeric Filters", expanded=False): # Group sliders, start collapsed
-        # Pass the established session object to the helper function
+    # --- Numeric Filters ---
+    st.markdown("---")
+    with st.expander("Numeric Filters", expanded=False):
+        slider_filters = {} # Initialize inside expander scope
         numeric_bounds = get_numeric_column_bounds(session, BASE_TABLE_NAME, NUMERIC_FILTER_COLUMNS)
-
         for col_name in NUMERIC_FILTER_COLUMNS:
             min_key = f"MIN_{col_name}"
             max_key = f"MAX_{col_name}"
-
-            # Check if valid bounds were retrieved for this column
             if min_key in numeric_bounds and max_key in numeric_bounds:
                 min_f = numeric_bounds[min_key]
                 max_f = numeric_bounds[max_key]
-
-                # Handle potential min > max from warning log above
+                min_slider, max_slider = (max_f, min_f) if min_f > max_f else (min_f, max_f)
                 if min_f > max_f:
-                    st.warning(f"Data issue for {col_name}: Min value ({min_f}) > Max value ({max_f}). Slider range might be incorrect.")
-                    # Using swapped values for slider range
-                    min_slider, max_slider = max_f, min_f
-                else:
-                     min_slider, max_slider = min_f, max_f
+                     st.warning(f"Data issue for {col_name}: Min > Max. Slider range inverted.")
 
-                default_value = (min_slider, max_slider) # Default is the full (potentially corrected) range
-
+                default_value = (min_slider, max_slider)
                 try:
-                    # Create the slider with a unique key
                     slider_key = f"slider_{col_name}"
                     selected_range = st.slider(
-                        label=col_name.replace("_", " ").capitalize(), # Prettier label
+                        label=col_name.replace("_", " ").capitalize(),
                         min_value=min_slider,
                         max_value=max_slider,
-                        value=default_value, # Start with full range
-                        key=slider_key # Add key for potential reset later
+                        value=default_value,
+                        key=slider_key
                     )
-
-                    # Store the selected range *only if it's different* from the full range
-                    # Compare against the actual min/max used for the slider
                     if selected_range != default_value:
-                        # Store the selected range from the slider
                         slider_filters[col_name] = selected_range
                 except Exception as slider_error:
-                     # Catch errors during slider creation (e.g., if min/max are still problematic)
                      logger.error(f"Error creating slider for {col_name}: {slider_error}", exc_info=True)
                      st.warning(f"Could not create filter slider for {col_name}.")
 
-            else:
-                # Warning is already shown in get_numeric_column_bounds if bounds failed
-                pass # Optionally add st.info(f"Filter for {col_name} unavailable.")
+
+# --- Display Spotify Player in Sidebar ---
+# This runs *before* displaying the song list, using the state from the *previous* run
+if st.session_state.selected_track_uri:
+    track_id = get_track_id_from_uri(st.session_state.selected_track_uri)
+    if track_id:
+        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
+        with spotify_player_area.container():
+             iframe(embed_url, height=152) # Use standard height for better UI
+    else:
+        spotify_player_area.empty() # Clear if URI is invalid
+else:
+    spotify_player_area.empty() # Clear if no track is selected
 
 
 # --- Apply Filters ---
@@ -328,7 +313,6 @@ filtered_df = session.table(BASE_TABLE_NAME)
 # Apply stage name filter using the selected filter value
 if selected_stage_filter_value is not None and selected_stage_filter_value != "All":
     try:
-        # Use quoted identifier if needed: col('"STAGE_NAME"')
         filtered_df = filtered_df.filter(col("STAGE_NAME") == selected_stage_filter_value)
         logger.info(f"Applied stage filter: {selected_stage_filter_value}")
     except Exception as e:
@@ -339,7 +323,6 @@ if selected_stage_filter_value is not None and selected_stage_filter_value != "A
 # Apply track name search filter (case-insensitive using lower)
 if track_search:
     try:
-        # Ensure lower function is available (imported at the top)
         filtered_df = filtered_df.filter(lower(col("NAME")).like(f"%{track_search.lower()}%"))
         logger.info(f"Applied track search: {track_search}")
     except Exception as e:
@@ -352,8 +335,6 @@ if slider_filters:
     logger.info(f"Applying {len(slider_filters)} numeric filters: {slider_filters}")
     for col_name, (min_val, max_val) in slider_filters.items():
         try:
-            # Use lit() for literal values
-            # Use quoted identifier if needed: col(f'"{col_name}"')
             filtered_df = filtered_df.filter((col(col_name) >= lit(min_val)) & (col(col_name) <= lit(max_val)))
         except Exception as e:
              logger.error(f"Error applying numeric filter for {col_name}: {e}", exc_info=True)
@@ -388,7 +369,6 @@ col1, col2 = st.columns([1, 3]) # Layout columns for pagination controls
 
 with col1:
     # Ensure max_value is at least 1
-    # The built-in `max` function is now used correctly due to the aliased import
     current_page = st.number_input(
         "Page",
         min_value=1,
@@ -406,26 +386,6 @@ with col2:
 
 # Calculate offset for the current page
 offset = (current_page - 1) * RESULTS_PER_PAGE
-
-
-# --- Display Spotify Player ---
-# This runs *before* displaying the song list, using the state from the *previous* run
-if st.session_state.selected_track_uri:
-    track_id = get_track_id_from_uri(st.session_state.selected_track_uri)
-    if track_id:
-        # --- CORRECTED EMBED URL ---
-        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
-        # Use the placeholder to embed the iframe
-        with spotify_player_area.container():
-             st.markdown("#### Now Playing Preview")
-             iframe(embed_url, height=152) # Use standard height for better UI
-             st.markdown("---") # Add separator after player
-    else:
-        # Clear the area if URI is invalid
-        spotify_player_area.empty()
-else:
-    # Clear the area if no track is selected
-    spotify_player_area.empty()
 
 
 # --- Fetch and Display Data Table ---
@@ -456,6 +416,12 @@ if row_count > 0:
             col for col in all_available_cols
             if col not in processed_cols and col != TRACK_URI_COLUMN # Exclude URI from display table
         ]
+        # Ensure the ORDER_BY_COLUMN is included if it wasn't already
+        if ORDER_BY_COLUMN in other_cols and ORDER_BY_COLUMN not in processed_cols:
+             display_order.append(ORDER_BY_COLUMN)
+             processed_cols.add(ORDER_BY_COLUMN)
+             other_cols.remove(ORDER_BY_COLUMN) # Remove from others if added here
+
         display_order.extend(sorted(other_cols))
 
         # This is the final order for display
@@ -467,11 +433,14 @@ if row_count > 0:
         if TRACK_URI_COLUMN in all_available_cols and TRACK_URI_COLUMN not in select_cols_for_query:
             select_cols_for_query.append(TRACK_URI_COLUMN)
         # Add ORDER_BY column if it exists and isn't already included
+        # NOTE: ORDER_BY_COLUMN is now TOTAL_MISMATCH_SCORE
         if ORDER_BY_COLUMN in all_available_cols and ORDER_BY_COLUMN not in select_cols_for_query:
              select_cols_for_query.append(ORDER_BY_COLUMN)
         elif ORDER_BY_COLUMN not in all_available_cols:
-             logger.warning(f"Order by column '{ORDER_BY_COLUMN}' not found in DataFrame schema. Pagination might be inconsistent.")
-
+             # If the sort column doesn't exist, fall back to default sort column or raise error
+             logger.error(f"Order by column '{ORDER_BY_COLUMN}' not found in DataFrame schema. Cannot sort.")
+             st.error(f"Configuration Error: Cannot sort by column '{ORDER_BY_COLUMN}' as it does not exist in the table.")
+             st.stop() # Stop execution if sorting is critical and column is missing
 
         # ADD SPINNER for data fetching/processing
         with st.spinner(f"Loading page {current_page}..."):
@@ -485,12 +454,11 @@ if row_count > 0:
             # Select only the columns needed for the query (includes sort and URI columns)
             paginated_query = filtered_df.select(select_cols_for_query)
 
-            # Apply ordering only if the column exists in the selected columns
-            if ORDER_BY_COLUMN in select_cols_for_query:
-                 # Use quoted identifier for order_by if needed: col(f'"{ORDER_BY_COLUMN}"')
-                 paginated_query = paginated_query.order_by(col(ORDER_BY_COLUMN).asc())
+            # Apply ordering using the specified ORDER_BY_COLUMN (ascending)
+            paginated_query = paginated_query.order_by(col(f'"{ORDER_BY_COLUMN}"').asc()) # Use quotes if needed, ensure .asc()
+
             # Apply limit to fetch necessary rows up to the end of the current page
-            paginated_query = paginated_query.limit(rows_to_fetch) # REMOVED .offset()
+            paginated_query = paginated_query.limit(rows_to_fetch)
 
 
             # Fetch data to Pandas - this executes the query
@@ -499,66 +467,74 @@ if row_count > 0:
 
             # Slice the Pandas DataFrame to get the rows for the current page
             display_pandas_df = all_fetched_pandas_df.iloc[offset:]
-            # Store the current page's dataframe in session state for the selector
-            st.session_state.current_page_df = display_pandas_df
+            # Store the original dataframe for this page in session state
+            st.session_state.current_page_df_orig = display_pandas_df.copy()
 
-        # --- Display using st.dataframe ---
-        # Ensure display_columns only contains columns present in the fetched pandas df
-        final_display_columns = [col for col in display_columns if col in display_pandas_df.columns]
-        st.dataframe(display_pandas_df[final_display_columns], use_container_width=True, hide_index=True) # Reverted to dataframe
+        # --- Prepare DataFrame for Data Editor ---
+        # Create a copy to add the 'PLAY' column
+        df_for_editor = display_pandas_df.copy()
+        # Add 'PLAY' column initialized to False
+        df_for_editor['PLAY'] = False
+        # Ensure 'PLAY' column is first
+        editor_columns_ordered = ['PLAY'] + [col for col in display_columns if col in df_for_editor.columns]
+        # Select and reorder columns for the editor
+        df_for_editor = df_for_editor[editor_columns_ordered]
 
-        # --- Song Selector for Playback ---
-        with song_selector_area.container():
-            st.markdown("---")
-            st.markdown("#### Select Song to Play Preview")
-            # Create options for the selectbox: "Track Name by Artist" (Index)
-            # Filter out rows with invalid URIs first
-            playable_songs_df = st.session_state.current_page_df[
-                st.session_state.current_page_df[TRACK_URI_COLUMN].apply(lambda x: bool(get_track_id_from_uri(x)))
-            ].copy() # Create a copy to avoid SettingWithCopyWarning
-
-            if not playable_songs_df.empty:
-                # Create display labels, using index as a unique identifier within the page
-                playable_songs_df['display_label'] = playable_songs_df.apply(
-                    lambda row: f"{row.get('NAME', 'Unknown Track')} by {row.get('ARTISTS', 'Unknown Artist')} (Index: {row.name})",
-                    axis=1
+        # --- Display using st.data_editor ---
+        st.markdown("### Song Results")
+        edited_df_state = st.data_editor(
+            df_for_editor,
+            key=EDITOR_KEY,
+            use_container_width=True,
+            hide_index=True,
+            # Configure the PLAY column as a checkbox
+            column_config={
+                "PLAY": st.column_config.CheckboxColumn(
+                    "Play Preview", # Column header label
+                    default=False, # Default value
                 )
-                song_options = pd.Series(playable_songs_df.index, index=playable_songs_df['display_label']).to_dict()
+            },
+            # Disable editing for all other columns
+            disabled=display_columns # Pass list of columns to disable
+        )
 
-                # Add a "None" option
-                options_with_none = {"-- Select a Song --": None}
-                options_with_none.update(song_options)
+        # --- Handle Play Action from Data Editor ---
+        # Check the state of the data editor for changes
+        if EDITOR_KEY in st.session_state:
+            editor_changes = st.session_state[EDITOR_KEY].get("edited_rows", {})
+            track_uri_to_play = None
+            for row_index, changes in editor_changes.items():
+                if changes.get("PLAY") is True:
+                    # Get the original index from the editor's internal mapping
+                    original_df_index = st.session_state.current_page_df_orig.index[row_index]
+                    # Get the URI from the original dataframe stored in state
+                    if TRACK_URI_COLUMN in st.session_state.current_page_df_orig.columns:
+                         track_uri_to_play = st.session_state.current_page_df_orig.loc[original_df_index, TRACK_URI_COLUMN]
+                         logger.info(f"Play requested for row index {row_index}, original index {original_df_index}, URI: {track_uri_to_play}")
+                         break # Play the first checked song found
 
-                selected_song_label = st.selectbox(
-                    "Select Song:",
-                    options=options_with_none.keys(),
-                    index=0, # Default to "-- Select a Song --"
-                    key="song_selector"
-                )
-
-                # Get the corresponding index from the selected label
-                selected_index = options_with_none[selected_song_label]
-
-                if selected_index is not None:
-                    # Get the URI from the original dataframe using the selected index
-                    selected_uri = st.session_state.current_page_df.loc[selected_index, TRACK_URI_COLUMN]
-                    # Update session state only if the selection changed
-                    if st.session_state.selected_track_uri != selected_uri:
-                        st.session_state.selected_track_uri = selected_uri
-                        st.rerun() # Rerun to update the player
-                # If "-- Select a Song --" is chosen and a track is playing, clear it
-                elif st.session_state.selected_track_uri is not None:
-                     st.session_state.selected_track_uri = None
-                     st.rerun()
-
-            else:
-                 st.info("No playable songs with valid Spotify URIs on this page.")
+            # Update session state if a valid track was selected and it's different
+            if track_uri_to_play and st.session_state.selected_track_uri != track_uri_to_play:
+                st.session_state.selected_track_uri = track_uri_to_play
+                st.rerun()
+            # If no checkbox is checked in the edits, but something is playing, stop it
+            elif not track_uri_to_play and st.session_state.selected_track_uri is not None:
+                 # Check if the currently playing track's checkbox was explicitly unchecked
+                 # This part is tricky as edited_rows only shows changes.
+                 # A simpler approach is to just stop if no *new* play is requested.
+                 # Let's refine: if the editor was interacted with (changes exist) and no PLAY=True is found, stop playback.
+                 if editor_changes and st.session_state.selected_track_uri is not None:
+                       st.session_state.selected_track_uri = None
+                       st.rerun()
 
 
     except SnowparkSQLException as e:
         logger.error(f"Snowpark SQL error displaying data: {e}", exc_info=True)
         st.error(f"Error fetching data for display: {e}. Check query logic or permissions.")
         st.dataframe(pd.DataFrame()) # Show empty dataframe on error
+    except KeyError as e:
+         logger.error(f"KeyError accessing DataFrame - likely missing column: {e}", exc_info=True)
+         st.error(f"Data Error: A required column ('{e}') might be missing from the results.")
     except Exception as e:
         logger.error(f"Unexpected error displaying data: {e}", exc_info=True)
         st.error(f"Unexpected error displaying data: {e}")
@@ -567,9 +543,8 @@ elif row_count == 0:
     # Display message if no rows match filters (and count was successful)
     st.info("No songs match the current filters. Try adjusting the filters in the sidebar.") # Slightly improved message
     # Clear the current page df and selected track if no results
-    st.session_state.current_page_df = pd.DataFrame()
+    st.session_state.current_page_df_orig = pd.DataFrame()
     if st.session_state.selected_track_uri is not None:
         st.session_state.selected_track_uri = None
-        st.rerun()
-
+        # Don't necessarily rerun here, let the player clear naturally on next run
 # Else: an error occurred during count, message already shown
