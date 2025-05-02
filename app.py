@@ -8,6 +8,7 @@ import pandas as pd
 import logging
 import re # Import regex for URI parsing
 from streamlit.components.v1 import iframe # Import iframe component
+import os # Import os to check for file existence
 
 # --- Set Page Config FIRST ---
 # This MUST be the first Streamlit command executed
@@ -21,10 +22,10 @@ NUMERIC_FILTER_COLUMNS = [
     "TEMPO", "ENERGY", "ACOUSTICNESS", "INSTRUMENTALNESS",
     "KEY", "MODE", "DURATION_MS", "TIME_SIGNATURE"
 ]
-# --- MODIFIED: Column for stable sorting ---
-# Ensure this column exists in your table!
+# Column for stable sorting (IMPORTANT for pagination!) - Use quoted if needed
 ORDER_BY_COLUMN = "TOTAL_MISMATCH_SCORE"
 TRACK_URI_COLUMN = "TRACK_URI" # Define the column name for Spotify URIs
+DESCRIPTIONS_FILE_PATH = "Spotify_Data_Dictionary.csv" # Path to your descriptions file
 
 # --- Setup Logging (Optional) ---
 logging.basicConfig(level=logging.INFO)
@@ -204,6 +205,30 @@ def get_numeric_column_bounds(_session, table_name, columns):
         st.warning(f"Could not fetch numeric bounds (unexpected error): {e}")
         return {}
 
+# --- NEW: Function to load descriptions from CSV ---
+@st.cache_data
+def load_filter_descriptions(filepath):
+    """Loads filter descriptions from a CSV file."""
+    descriptions = {}
+    if not os.path.exists(filepath):
+        logger.warning(f"Descriptions file not found at: {filepath}")
+        return descriptions
+    try:
+        df = pd.read_csv(filepath)
+        # Assuming CSV has columns 'COLUMN_NAME' and 'DESCRIPTION'
+        # Convert column names to uppercase for consistent matching
+        df.columns = [col.upper() for col in df.columns]
+        if "COLUMN_NAME" in df.columns and "DESCRIPTION" in df.columns:
+             # Create dictionary, ensuring column names are uppercase
+             descriptions = pd.Series(df.DESCRIPTION.values, index=df.COLUMN_NAME.str.upper()).to_dict()
+             logger.info(f"Successfully loaded {len(descriptions)} descriptions from {filepath}")
+        else:
+             logger.error(f"CSV file {filepath} must contain 'COLUMN_NAME' and 'DESCRIPTION' columns.")
+    except Exception as e:
+        logger.error(f"Error loading descriptions from {filepath}: {e}", exc_info=True)
+        st.warning(f"Could not load descriptions from {filepath}. Tooltips will be unavailable.")
+    return descriptions
+
 # --- Spotify Helper ---
 def get_track_id_from_uri(uri):
     """Extracts the Spotify Track ID from a URI string."""
@@ -220,6 +245,9 @@ def get_track_id_from_uri(uri):
 
 # Connect to Snowflake
 session = connect_to_snowflake()
+
+# Load filter descriptions
+filter_descriptions = load_filter_descriptions(DESCRIPTIONS_FILE_PATH)
 
 # Initialize session state
 if 'selected_track_uri' not in st.session_state:
@@ -276,6 +304,9 @@ with st.sidebar:
                      st.warning(f"Data issue for {col_name}: Min > Max. Slider range inverted.")
 
                 default_value = (min_slider, max_slider)
+                # --- Get description for tooltip ---
+                tooltip_text = filter_descriptions.get(col_name, "No description available.") # Use .get for safety
+
                 try:
                     slider_key = f"slider_{col_name}"
                     selected_range = st.slider(
@@ -283,7 +314,8 @@ with st.sidebar:
                         min_value=min_slider,
                         max_value=max_slider,
                         value=default_value,
-                        key=slider_key
+                        key=slider_key,
+                        help=tooltip_text # Add the description here
                     )
                     if selected_range != default_value:
                         slider_filters[col_name] = selected_range
@@ -503,27 +535,30 @@ if row_count > 0:
         if EDITOR_KEY in st.session_state:
             editor_changes = st.session_state[EDITOR_KEY].get("edited_rows", {})
             track_uri_to_play = None
+            # Find the first row where PLAY was set to True in the latest edit
             for row_index, changes in editor_changes.items():
                 if changes.get("PLAY") is True:
                     # Get the original index from the editor's internal mapping
-                    original_df_index = st.session_state.current_page_df_orig.index[row_index]
-                    # Get the URI from the original dataframe stored in state
-                    if TRACK_URI_COLUMN in st.session_state.current_page_df_orig.columns:
-                         track_uri_to_play = st.session_state.current_page_df_orig.loc[original_df_index, TRACK_URI_COLUMN]
-                         logger.info(f"Play requested for row index {row_index}, original index {original_df_index}, URI: {track_uri_to_play}")
-                         break # Play the first checked song found
+                    # Ensure row_index is within bounds of the original df index
+                    if row_index < len(st.session_state.current_page_df_orig.index):
+                        original_df_index = st.session_state.current_page_df_orig.index[row_index]
+                        # Get the URI from the original dataframe stored in state
+                        if TRACK_URI_COLUMN in st.session_state.current_page_df_orig.columns:
+                             track_uri_to_play = st.session_state.current_page_df_orig.loc[original_df_index, TRACK_URI_COLUMN]
+                             logger.info(f"Play requested for editor row index {row_index}, original index {original_df_index}, URI: {track_uri_to_play}")
+                             break # Play the first checked song found
+                    else:
+                         logger.warning(f"Editor row index {row_index} out of bounds for original dataframe index.")
 
-            # Update session state if a valid track was selected and it's different
+
+            # Update session state only if a valid track was selected and it's different
             if track_uri_to_play and st.session_state.selected_track_uri != track_uri_to_play:
                 st.session_state.selected_track_uri = track_uri_to_play
                 st.rerun()
             # If no checkbox is checked in the edits, but something is playing, stop it
             elif not track_uri_to_play and st.session_state.selected_track_uri is not None:
-                 # Check if the currently playing track's checkbox was explicitly unchecked
-                 # This part is tricky as edited_rows only shows changes.
-                 # A simpler approach is to just stop if no *new* play is requested.
-                 # Let's refine: if the editor was interacted with (changes exist) and no PLAY=True is found, stop playback.
-                 if editor_changes and st.session_state.selected_track_uri is not None:
+                 # Check if the editor was interacted with (changes exist) and no PLAY=True is found
+                 if editor_changes:
                        st.session_state.selected_track_uri = None
                        st.rerun()
 
