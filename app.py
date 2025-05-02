@@ -8,7 +8,7 @@ import pandas as pd
 import logging
 import re # Import regex for URI parsing
 from streamlit.components.v1 import iframe # Import iframe component
-import os # Import os to check for file existence
+# import os # No longer needed
 
 # --- Set Page Config FIRST ---
 # This MUST be the first Streamlit command executed
@@ -25,7 +25,26 @@ NUMERIC_FILTER_COLUMNS = [
 # Column for stable sorting (IMPORTANT for pagination!) - Use quoted if needed
 ORDER_BY_COLUMN = "TOTAL_MISMATCH_SCORE"
 TRACK_URI_COLUMN = "TRACK_URI" # Define the column name for Spotify URIs
-DESCRIPTIONS_FILE_PATH = "Spotify_Data_Dictionary.csv" # Path to your descriptions file
+# DESCRIPTIONS_FILE_PATH = "Spotify_Data_Dictionary.csv" # No longer needed
+
+# --- NEW: Hardcoded Filter Descriptions ---
+FILTER_DESCRIPTIONS = {
+    "DANCEABILITY": "Danceability describes how suitable a track is for dancing based on a combination of musical elements including tempo, rhythm stability, beat strength, and overall regularity. A value of 0.0 is least danceable and 1.0 is most danceable.",
+    "LOUDNESS": "The overall loudness of a track in decibels (dB). Loudness values are averaged across the entire track and are useful for comparing relative loudness of tracks. Loudness is the quality of a sound that is the primary psychological correlate of physical strength (amplitude). Values typically range between -60 and 0 db.",
+    "SPEECHINESS": "Speechiness detects the presence of spoken words in a track. The more exclusively speech-like the recording (e.g. talk show, audio book, poetry), the closer to 1.0 the attribute value. Values above 0.66 describe tracks that are probably made entirely of spoken words. Values between 0.33 and 0.66 describe tracks that may contain both music and speech, either in sections or layered, including such cases as rap music. Values below 0.33 most likely represent music and other non-speech-like tracks.",
+    "LIVENESS": "Detects the presence of an audience in the recording. Higher liveness values represent an increased probability that the track was performed live. A value above 0.8 provides strong likelihood that the track is live.",
+    "VALENCE": "A measure from 0.0 to 1.0 describing the musical positiveness conveyed by a track. Tracks with high valence sound more positive (e.g. happy, cheerful, euphoric), while tracks with low valence sound more negative (e.g. sad, depressed, angry).",
+    "TEMPO": "The overall estimated tempo of a track in beats per minute (BPM). In musical terminology, tempo is the speed or pace of a given piece and derives directly from the average beat duration.",
+    "ENERGY": "Energy is a measure from 0.0 to 1.0 and represents a perceptual measure of intensity and activity. Typically, energetic tracks feel fast, loud, and noisy. For example, death metal has high energy, while a Bach prelude scores low on the scale. Perceptual features contributing to this attribute include dynamic range, perceived loudness, timbre, onset rate, and general entropy.",
+    "ACOUSTICNESS": "A confidence measure from 0.0 to 1.0 of whether the track is acoustic. 1.0 represents high confidence the track is acoustic.",
+    "INSTRUMENTALNESS": "Predicts whether a track contains no vocals. 'Ooh' and 'aah' sounds are treated as instrumental in this context. Rap or spoken word tracks are clearly 'vocal'. The closer the instrumentalness value is to 1.0, the greater likelihood the track contains no vocal content. Values above 0.5 are intended to represent instrumental tracks, but confidence is higher as the value approaches 1.0.",
+    "KEY": "The key the track is in. Integers map to pitches using standard Pitch Class notation. E.g. 0 = C, 1 = C♯/D♭, 2 = D, and so on. If no key was detected, the value is -1.",
+    "MODE": "Mode indicates the modality (major or minor) of a track, the type of scale from which its melodic content is derived. Major is represented by 1 and minor is 0.",
+    "DURATION_MS": "The duration of the track in milliseconds.",
+    "TIME_SIGNATURE": "An estimated time signature. The time signature (meter) is a notational convention to specify how many beats are in each bar (or measure). The time signature ranges from 3 to 7 indicating time signatures of '3/4', to '7/4'."
+    # Add descriptions for any other numeric columns if needed
+}
+
 
 # --- Setup Logging (Optional) ---
 logging.basicConfig(level=logging.INFO)
@@ -205,29 +224,10 @@ def get_numeric_column_bounds(_session, table_name, columns):
         st.warning(f"Could not fetch numeric bounds (unexpected error): {e}")
         return {}
 
-# --- NEW: Function to load descriptions from CSV ---
-@st.cache_data
-def load_filter_descriptions(filepath):
-    """Loads filter descriptions from a CSV file."""
-    descriptions = {}
-    if not os.path.exists(filepath):
-        logger.warning(f"Descriptions file not found at: {filepath}")
-        return descriptions
-    try:
-        df = pd.read_csv(filepath)
-        # Assuming CSV has columns 'COLUMN_NAME' and 'DESCRIPTION'
-        # Convert column names to uppercase for consistent matching
-        df.columns = [col.upper() for col in df.columns]
-        if "COLUMN_NAME" in df.columns and "DESCRIPTION" in df.columns:
-             # Create dictionary, ensuring column names are uppercase
-             descriptions = pd.Series(df.DESCRIPTION.values, index=df.COLUMN_NAME.str.upper()).to_dict()
-             logger.info(f"Successfully loaded {len(descriptions)} descriptions from {filepath}")
-        else:
-             logger.error(f"CSV file {filepath} must contain 'COLUMN_NAME' and 'DESCRIPTION' columns.")
-    except Exception as e:
-        logger.error(f"Error loading descriptions from {filepath}: {e}", exc_info=True)
-        st.warning(f"Could not load descriptions from {filepath}. Tooltips will be unavailable.")
-    return descriptions
+# --- REMOVED: Function to load descriptions from CSV ---
+# @st.cache_data
+# def load_filter_descriptions(filepath):
+#     ...
 
 # --- Spotify Helper ---
 def get_track_id_from_uri(uri):
@@ -246,8 +246,9 @@ def get_track_id_from_uri(uri):
 # Connect to Snowflake
 session = connect_to_snowflake()
 
-# Load filter descriptions
-filter_descriptions = load_filter_descriptions(DESCRIPTIONS_FILE_PATH)
+# --- Use hardcoded descriptions ---
+# filter_descriptions = load_filter_descriptions(DESCRIPTIONS_FILE_PATH) # Removed
+filter_descriptions = FILTER_DESCRIPTIONS # Use the hardcoded dict
 
 # Initialize session state
 if 'selected_track_uri' not in st.session_state:
@@ -304,8 +305,8 @@ with st.sidebar:
                      st.warning(f"Data issue for {col_name}: Min > Max. Slider range inverted.")
 
                 default_value = (min_slider, max_slider)
-                # --- Get description for tooltip ---
-                tooltip_text = filter_descriptions.get(col_name, "No description available.") # Use .get for safety
+                # --- Get description for tooltip from hardcoded dictionary ---
+                tooltip_text = filter_descriptions.get(col_name.upper(), "No description available.") # Use .get and ensure uppercase key
 
                 try:
                     slider_key = f"slider_{col_name}"
