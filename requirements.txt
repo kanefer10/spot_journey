@@ -1,4 +1,4 @@
 streamlit
+snowflake-snowpark-python
 pandas
 pyyaml
-snowflake-snowpark-python
